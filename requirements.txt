@@ -1,6 +1,6 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
-numpy>=1.26,<2.0          # <- para que no intente 2.x
+numpy>=1.26,<2.0
 librosa
 soundfile
 scipy
