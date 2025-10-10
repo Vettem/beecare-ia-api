@@ -1,9 +1,14 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
-numpy>=1.26,<2.0
-librosa
+
+# NumPy 2.x para py3.13 + TF 2.20
+numpy>=2.1.0
+
+# SciPy/librosa compatibles con NumPy 2.x
+scipy>=1.13
+librosa>=0.10
 soundfile
-scipy
+
 tensorflow-cpu==2.20.0
 python-multipart
 firebase-admin
