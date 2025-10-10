@@ -4,7 +4,7 @@ numpy>=1.26,<2.0
 librosa
 soundfile
 scipy
-tensorflow-cpu==2.17.0
+tensorflow-cpu==2.20.0
 python-multipart
 firebase-admin
 google-cloud-storage
