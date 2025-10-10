@@ -1,0 +1,14 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+# TensorFlow CPU (compatible con Py 3.10–3.12 y más liviano)
+tensorflow-cpu==2.17.0
+
+# Versiones compatibles con TF/librosa en Windows
+numpy==1.26.4
+librosa==0.10.2.post1
+soundfile==0.12.1
+python-multipart==0.0.9
+
+# Para Firestore opcional
+firebase-admin==6.5.0
