@@ -1,7 +1,28 @@
 import io, os, time, json
 import numpy as np
 import librosa
-from fastapi import FastAPI, File, UploadFile, HTTPException
+import os, json, base64
+
+USE_FIREBASE = os.getenv("USE_FIREBASE", "0") == "1"
+db = None
+if USE_FIREBASE:
+    try:
+        import firebase_admin
+        from firebase_admin import credentials, firestore
+
+        b64 = os.getenv("FIREBASE_CREDENTIALS_BASE64")
+        if not b64:
+            print("⚠️ USE_FIREBASE=1 pero falta FIREBASE_CREDENTIALS_BASE64")
+        else:
+            info = json.loads(base64.b64decode(b64).decode("utf-8"))
+            cred = credentials.Certificate(info)
+            firebase_admin.initialize_app(cred)
+            db = firestore.client()
+            print("✅ Firestore listo (project_id:", info.get("project_id"), ")")
+    except Exception as e:
+        print("🔥 Error inicializando Firestore:", e)
+
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from tensorflow.keras.models import load_model
 
@@ -49,7 +70,8 @@ def root():
     return {"ok": True, "service": "BeeCare IA API"}
 
 @app.post("/predict")
-async def predict(file: UploadFile = File(...)):
+async def predict(hiveId: str | None = Query(default=None),
+    userId: str | None = Query(default=None), file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".wav"):
         raise HTTPException(status_code=400, detail="Sube un archivo .wav")
     raw = await file.read()
@@ -66,9 +88,20 @@ async def predict(file: UploadFile = File(...)):
 
     probs = MODEL.predict(x, verbose=0)[0]
     idx = int(np.argmax(probs))
-    return {
+    result = {
         "label": LABELS[idx],
         "confidence": float(probs[idx]),
         "probs": {LABELS[i]: float(p) for i, p in enumerate(probs)},
         "ts": int(time.time()),
+        "filename": file.filename,
     }
+
+    if hiveId:
+        result["hiveId"] = hiveId
+    if userId:
+        result["userId"] = userId
+
+    if db:
+        db.collection("predictions").add(result)
+    
+    return result
