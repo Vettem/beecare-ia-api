@@ -1,8 +1,13 @@
-import io, os, time, json
+import os, io, time, json, base64, pathlib
 import numpy as np
 import librosa
-import os, json, base64
+import requests
 
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from tensorflow.keras.models import load_model
+
+# ========= Firestore opcional =========
 USE_FIREBASE = os.getenv("USE_FIREBASE", "0") == "1"
 db = None
 if USE_FIREBASE:
@@ -22,38 +27,67 @@ if USE_FIREBASE:
     except Exception as e:
         print("🔥 Error inicializando Firestore:", e)
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-from tensorflow.keras.models import load_model
+# ========= Config =========
+# URLs para descargar el modelo/labels si no existen en disco
+MODEL_URL  = os.getenv("MODEL_URL",  "")   # p.ej. https://github.com/<user>/<repo>/releases/download/v1.0/abejas_model_augmented.h5
+LABELS_URL = os.getenv("LABELS_URL", "")   # opcional: https://.../labels.json
 
-# ===== Config preprocesamiento (igual que en el training) =====
-N_MELS = 64
+MODELS_DIR  = pathlib.Path("models")
+MODEL_PATH  = MODELS_DIR / "abejas_model_augmented.h5"
+LABELS_PATH = MODELS_DIR / "labels.json"
+
+# Preprocesamiento (igual que en el training)
+N_MELS        = 64
 TARGET_FRAMES = 216
-DURATION_SEC = 5
-SAMPLE_RATE = None   # respeta SR original
+DURATION_SEC  = 5
+SAMPLE_RATE   = None  # respeta SR original
 
-# ===== App =====
+def download_if_missing(url: str, dest: pathlib.Path):
+    """Descarga un archivo a 'dest' solo si no existe."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        return
+    if not url:
+        raise RuntimeError(f"Falta URL para descargar {dest.name}")
+    print(f"⬇️ Descargando {dest.name} ...")
+    r = requests.get(url, stream=True, timeout=180)
+    r.raise_for_status()
+    with open(dest, "wb") as f:
+        for chunk in r.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
+    print(f"✅ {dest.name} descargado ({dest.stat().st_size} bytes)")
+
+# Descarga modelo/labels si faltan
+if not MODEL_PATH.exists():
+    download_if_missing(MODEL_URL, MODEL_PATH)
+if not LABELS_PATH.exists() and LABELS_URL:
+    download_if_missing(LABELS_URL, LABELS_PATH)
+
+# Cargar labels
+if LABELS_PATH.exists():
+    with open(LABELS_PATH, "r", encoding="utf-8") as f:
+        LABELS = json.load(f)
+else:
+    # Fallback si no subiste labels.json
+    LABELS = ["reina_ausente", "sana"]
+
+# Cargar modelo
+if not MODEL_PATH.exists():
+    raise RuntimeError(f"No se encontró {MODEL_PATH}")
+print("🧠 Cargando modelo Keras...")
+MODEL = load_model(str(MODEL_PATH))
+print("✅ Modelo listo.")
+
+# ========= FastAPI =========
 app = FastAPI(title="BeeCare IA API", version="1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],        # en prod: restringe a tu dominio
+    allow_origins=["*"],  # en prod: restringe a tu dominio
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ===== Cargar labels y modelo =====
-LABELS_PATH = "models/labels.json"
-MODEL_PATH = "models/abejas_model_augmented.h5"
-
-if not os.path.exists(LABELS_PATH):
-    raise RuntimeError(f"No se encontró {LABELS_PATH}")
-with open(LABELS_PATH, "r", encoding="utf-8") as f:
-    LABELS = json.load(f)
-
-if not os.path.exists(MODEL_PATH):
-    raise RuntimeError(f"No se encontró {MODEL_PATH}")
-MODEL = load_model(MODEL_PATH)
 
 def to_fixed_mel(y, sr, n_mels=N_MELS, target_frames=TARGET_FRAMES):
     mel = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=n_mels)
@@ -70,10 +104,14 @@ def root():
     return {"ok": True, "service": "BeeCare IA API"}
 
 @app.post("/predict")
-async def predict(hiveId: str | None = Query(default=None),
-    userId: str | None = Query(default=None), file: UploadFile = File(...)):
+async def predict(
+    hiveId: str | None = Query(default=None),
+    userId: str | None = Query(default=None),
+    file: UploadFile = File(...),
+):
     if not file.filename.lower().endswith(".wav"):
         raise HTTPException(status_code=400, detail="Sube un archivo .wav")
+
     raw = await file.read()
     if len(raw) > 8 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Archivo demasiado grande (máx 8MB)")
@@ -95,13 +133,10 @@ async def predict(hiveId: str | None = Query(default=None),
         "ts": int(time.time()),
         "filename": file.filename,
     }
-
-    if hiveId:
-        result["hiveId"] = hiveId
-    if userId:
-        result["userId"] = userId
+    if hiveId: result["hiveId"] = hiveId
+    if userId: result["userId"] = userId
 
     if db:
         db.collection("predictions").add(result)
-    
+
     return result
