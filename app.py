@@ -116,9 +116,21 @@ async def predict(
     # Guardado opcional en Firestore
     if db:
         try:
-            db.collection("predictions").add(result)
+            from firebase_admin import firestore as _fs
+            doc = {
+                **result,
+                "createdAt": _fs.SERVER_TIMESTAMP,  # fecha del servidor
+                "read": False,                      # no leída por defecto
+            }
+            if hiveId:
+                doc["hiveId"] = hiveId
+            if userId:
+                doc["userId"] = userId
+
+            db.collection("predictions").add(doc)
         except Exception as e:
             print("⚠️ No se pudo escribir en Firestore:", e)
+
 
     return result
 
