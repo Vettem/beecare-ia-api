@@ -142,8 +142,20 @@ def run_inference_on_bytes(audio_bytes: bytes):
     pred_idx = int(np.argmax(preds))
     probability = float(preds[pred_idx])
 
-    # LABELS se asume dict: { "0": "clase1", "1": "clase2", ... }
-    prediction = LABELS.get(str(pred_idx), f"class_{pred_idx}")
+    # --- NUEVO: soportar labels como dict o como lista ---
+    if isinstance(LABELS, dict):
+        # Formato: { "0": "clase1", "1": "clase2", ... }
+        prediction = LABELS.get(str(pred_idx), f"class_{pred_idx}")
+    elif isinstance(LABELS, list):
+        # Formato: ["clase1", "clase2", ...]
+        if 0 <= pred_idx < len(LABELS):
+            prediction = LABELS[pred_idx]
+        else:
+            prediction = f"class_{pred_idx}"
+    else:
+        # Por si acaso, fallback neutro
+        prediction = f"class_{pred_idx}"
+    # -----------------------------------------------------
 
     return prediction, probability
 
