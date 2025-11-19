@@ -17,3 +17,6 @@ firebase-admin==6.5.0
 # Google Cloud
 google-cloud-storage
 google-cloud-firestore
+
+functions-framework==3.*
+requests==2.*
