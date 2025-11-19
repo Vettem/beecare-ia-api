@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 import tempfile
 
+import hashlib
+
 import numpy as np
 import tensorflow as tf
 import librosa
@@ -255,11 +257,17 @@ async def analyze_audio_gcs(payload: GCSAnalyzeRequest):
         if not blob.exists():
             raise HTTPException(status_code=404, detail="Audio no encontrado en Storage")
 
+        # 1) Descargar audio desde GCS
         audio_bytes = blob.download_as_bytes()
 
+        # 2) Ejecutar el modelo
         prediction, probability = run_inference_on_bytes(audio_bytes)
 
-        analysis_id = str(uuid.uuid4())
+        # 3) Usar un ID determinístico basado en el path del audio
+        #    Así, si el trigger se dispara varias veces para el mismo archivo,
+        #    siempre se sobreescribe el mismo documento.
+        raw = payload.gcs_path.encode("utf-8")
+        analysis_id = hashlib.sha256(raw).hexdigest()[:20]
 
         doc_ref = (
             firestore_client.collection("users")
@@ -270,6 +278,7 @@ async def analyze_audio_gcs(payload: GCSAnalyzeRequest):
             .document(analysis_id)
         )
 
+        # 4) Guardar / actualizar en Firestore (set = upsert)
         doc_ref.set(
             {
                 "audioPath": payload.gcs_path,
@@ -290,6 +299,7 @@ async def analyze_audio_gcs(payload: GCSAnalyzeRequest):
 
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         logger.error("Error en /analyze-audio-gcs", exc_info=True)
         raise HTTPException(status_code=500, detail="Error interno al analizar audio desde GCS")
+# ------------------------------------------------------------
