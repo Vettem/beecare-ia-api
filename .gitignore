@@ -4,3 +4,4 @@ __pycache__/
 .env
 .env.local
 models/*.h5
+keys/
