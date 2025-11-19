@@ -3,5 +3,4 @@ __pycache__/
 *.pyc
 .env
 .env.local
-models/*.h5
 keys/
