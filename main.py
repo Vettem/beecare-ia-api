@@ -36,17 +36,18 @@ app = FastAPI(
 BASE_DIR = Path(__file__).resolve().parent
 
 # Rutas del modelo y labels dentro de la imagen
-MODEL_PATH = BASE_DIR / "model" / "abejas_model_augmented.h5"
+MODEL_PATH = BASE_DIR / "model" / "model_queenbee.h5"
 LABELS_PATH = BASE_DIR / "model" / "labels.json"
 
 # Nombre del bucket (ajusta si usas otro)
 BUCKET_NAME = "burnished-web-475115-b8.firebasestorage.app"
 
 # Parámetros de preprocesamiento (ajústalos a tu entrenamiento real)
-SAMPLE_RATE = 22050
-DURATION = 5           # segundos máximos a considerar
-N_MELS = 128
-FIXED_TIME_STEPS = 128  # ancho del mel-espectrograma
+# Estos valores DEBEN coincidir con los usados al entrenar el modelo queenbee.h5
+SAMPLE_RATE = 16000        # frecuencia de muestreo
+DURATION = 10              # segundos de audio usados por predicción
+N_MELS = 64                # número de filtros mel
+CLIP_SAMPLES = SAMPLE_RATE * DURATION  # muestras totales por clip
 
 # Clientes de GCP (usan credenciales por defecto en Cloud Run)
 storage_client = storage.Client()
@@ -59,8 +60,10 @@ LABELS = None
 # ------------------------------------------------------------
 # Carga del modelo y labels
 # ------------------------------------------------------------
-
 def load_model_and_labels():
+    """
+    Carga el modelo .h5 y el archivo de labels.json al iniciar la app.
+    """
     global MODEL, LABELS
 
     if MODEL is not None and LABELS is not None:
@@ -92,37 +95,43 @@ load_model_and_labels()
 
 def preprocess_audio_file(filepath: str) -> np.ndarray:
     """
-    Carga un archivo de audio y lo convierte en un tensor listo
-    para el modelo. Ajusta esta función para que coincida con
-    el preprocesamiento usado en el entrenamiento.
+    Carga un archivo de audio desde disco y lo convierte en un tensor
+    listo para el modelo de clasificación de colmenas con/sin reina.
+
+    IMPORTANTE: este preprocesamiento DEBE coincidir con el usado
+    para entrenar el modelo model_queenbee.h5.
     """
-    # Cargar audio (recorta a 'DURATION' para no explotar memoria)
-    y, sr = librosa.load(filepath, sr=SAMPLE_RATE, duration=DURATION)
+    # Cargar audio en mono y a SAMPLE_RATE (por ejemplo, 16 kHz)
+    y, sr = librosa.load(filepath, sr=SAMPLE_RATE, mono=True)
 
     if y.size == 0:
         raise HTTPException(status_code=400, detail="Audio vacío o no válido")
 
-    # Mel-espectrograma
-    mel = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=N_MELS)
+    # Ajustar duración: si es más corto, rellenar con ceros; si es más largo, recortar
+    if len(y) < CLIP_SAMPLES:
+        pad = CLIP_SAMPLES - len(y)
+        y = np.pad(y, (0, pad))
+    else:
+        y = y[:CLIP_SAMPLES]
+
+    # Mel-espectrograma con mismos parámetros que el entrenamiento
+    mel = librosa.feature.melspectrogram(
+        y=y,
+        sr=SAMPLE_RATE,
+        n_fft=1024,
+        hop_length=512,
+        n_mels=N_MELS,
+    )
     mel_db = librosa.power_to_db(mel, ref=np.max)
 
-    # Normalizar tamaño en el eje de tiempo (padding/truncado)
-    if mel_db.shape[1] < FIXED_TIME_STEPS:
-        pad_width = FIXED_TIME_STEPS - mel_db.shape[1]
-        mel_db = np.pad(mel_db, ((0, 0), (0, pad_width)), mode="constant")
-    else:
-        mel_db = mel_db[:, :FIXED_TIME_STEPS]
-
-    # Normalización básica [0,1]
-    mel_min = mel_db.min()
-    mel_max = mel_db.max()
-    mel_db = (mel_db - mel_min) / (mel_max - mel_min + 1e-9)
+    # Normalización igual que en el script de entrenamiento: aproximar a rango [0, 1]
+    mel_norm = (mel_db + 80.0) / 80.0
 
     # Añadir batch y canal: (1, H, W, 1)
-    mel_db = mel_db.astype("float32")
-    mel_db = mel_db[np.newaxis, ..., np.newaxis]
+    mel_norm = mel_norm.astype("float32")
+    mel_norm = mel_norm[np.newaxis, ..., np.newaxis]
 
-    return mel_db
+    return mel_norm
 
 
 def run_inference_on_bytes(audio_bytes: bytes):
@@ -138,11 +147,12 @@ def run_inference_on_bytes(audio_bytes: bytes):
         tmp.write(audio_bytes)
         tmp.flush()
 
-        input_tensor = preprocess_audio_file(tmp.name)
+        mel_input = preprocess_audio_file(tmp.name)
 
-    preds = MODEL.predict(input_tensor)[0]
-    pred_idx = int(np.argmax(preds))
-    probability = float(preds[pred_idx])
+    # Ejecutar el modelo
+    preds = MODEL.predict(mel_input)
+    pred_idx = int(np.argmax(preds, axis=1)[0])
+    probability = float(np.max(preds, axis=1)[0])
 
     # --- NUEVO: soportar labels como dict o como lista ---
     if isinstance(LABELS, dict):
@@ -176,9 +186,9 @@ class GCSAnalyzeRequest(BaseModel):
 # Endpoints
 # ------------------------------------------------------------
 
-@app.get("/ping")
-async def ping():
-    return {"status": "ok", "message": "BeeCare IA API funcionando"}
+@app.get("/")
+def root():
+    return {"message": "BeeCare IA API funcionando"}
 
 
 @app.post("/analyze-audio")
@@ -188,25 +198,30 @@ async def analyze_audio(
     hive_id: str = Form(...)
 ):
     """
-    Recibe un archivo de audio, lo sube a Storage,
-    lo analiza con el modelo y guarda el resultado en Firestore.
+    Recibe un archivo de audio (desde la app móvil), lo sube a GCS,
+    ejecuta el modelo y guarda el resultado en Firestore.
     """
     try:
-        audio_bytes = await file.read()
+        if file.content_type not in ["audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3"]:
+            raise HTTPException(status_code=400, detail="Formato de audio no soportado")
 
-        if not audio_bytes:
-            raise HTTPException(status_code=400, detail="Archivo vacío")
+        # Leer bytes del archivo subido
+        contents = await file.read()
 
-        # 1) Subir al bucket
+        # Generar un nombre único para el archivo
         audio_id = str(uuid.uuid4())
-        gcs_path = f"users/{uid}/hives/{hive_id}/audios/{audio_id}.wav"
+        filename = f"{audio_id}.wav"
 
+        # Ruta dentro del bucket
+        gcs_path = f"users/{uid}/hives/{hive_id}/device-audios/{filename}"
+
+        # 1) Subir a Cloud Storage
         bucket = storage_client.bucket(BUCKET_NAME)
         blob = bucket.blob(gcs_path)
-        blob.upload_from_string(audio_bytes, content_type="audio/wav")
+        blob.upload_from_string(contents, content_type="audio/wav")
 
         # 2) Ejecutar el modelo
-        prediction, probability = run_inference_on_bytes(audio_bytes)
+        prediction, probability = run_inference_on_bytes(contents)
 
         # 3) Guardar en Firestore
         doc_ref = (
@@ -218,16 +233,15 @@ async def analyze_audio(
             .document(audio_id)
         )
 
-        doc_ref.set(
-            {
-                "audioPath": gcs_path,
-                "prediction": prediction,
-                "probability": probability,
-                "status": "ok",
-                "source": "api_upload",
-                "createdAt": firestore.SERVER_TIMESTAMP,
-            }
-        )
+        doc_data = {
+            "audioPath": gcs_path,
+            "prediction": prediction,
+            "probability": probability,
+            "createdAt": datetime.utcnow(),
+            "source": "device-upload",
+        }
+
+        doc_ref.set(doc_data)
 
         return {
             "audioId": audio_id,
@@ -238,7 +252,7 @@ async def analyze_audio(
 
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         logger.error("Error en /analyze-audio", exc_info=True)
         raise HTTPException(status_code=500, detail="Error interno al analizar audio")
 
@@ -246,28 +260,26 @@ async def analyze_audio(
 @app.post("/analyze-audio-gcs")
 async def analyze_audio_gcs(payload: GCSAnalyzeRequest):
     """
-    Analiza un audio que YA está en Cloud Storage.
-    La Cloud Function llamará a este endpoint cuando
-    se suba un nuevo .wav desde el dispositivo.
+    Recibe la ruta de un audio ya existente en GCS, lo descarga,
+    ejecuta el modelo y guarda el resultado en Firestore.
     """
     try:
+        # 1) Descargar audio desde GCS
         bucket = storage_client.bucket(BUCKET_NAME)
         blob = bucket.blob(payload.gcs_path)
 
         if not blob.exists():
-            raise HTTPException(status_code=404, detail="Audio no encontrado en Storage")
+            raise HTTPException(status_code=404, detail="El archivo de audio no existe en GCS")
 
-        # 1) Descargar audio desde GCS
         audio_bytes = blob.download_as_bytes()
 
         # 2) Ejecutar el modelo
         prediction, probability = run_inference_on_bytes(audio_bytes)
 
-        # 3) Usar un ID determinístico basado en el path del audio
-        #    Así, si el trigger se dispara varias veces para el mismo archivo,
-        #    siempre se sobreescribe el mismo documento.
-        raw = payload.gcs_path.encode("utf-8")
-        analysis_id = hashlib.sha256(raw).hexdigest()[:20]
+        # 3) Guardar en Firestore
+        # Generamos un ID a partir del hash del path + timestamp
+        hash_input = f"{payload.gcs_path}-{datetime.utcnow().isoformat()}".encode("utf-8")
+        analysis_id = hashlib.sha256(hash_input).hexdigest()[:16]
 
         doc_ref = (
             firestore_client.collection("users")
@@ -278,17 +290,15 @@ async def analyze_audio_gcs(payload: GCSAnalyzeRequest):
             .document(analysis_id)
         )
 
-        # 4) Guardar / actualizar en Firestore (set = upsert)
-        doc_ref.set(
-            {
-                "audioPath": payload.gcs_path,
-                "prediction": prediction,
-                "probability": probability,
-                "status": "ok",
-                "source": "device_gcs",
-                "createdAt": firestore.SERVER_TIMESTAMP,
-            }
-        )
+        doc_data = {
+            "audioPath": payload.gcs_path,
+            "prediction": prediction,
+            "probability": probability,
+            "createdAt": datetime.utcnow(),
+            "source": "gcs-analyze",
+        }
+
+        doc_ref.set(doc_data)
 
         return {
             "audioId": analysis_id,

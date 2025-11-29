@@ -1,1 +1,4 @@
-["reina_ausente", "sana"]
+{
+  "0": "sin_reina",
+  "1": "con_reina"
+}
