@@ -277,8 +277,8 @@ async def analyze_audio_gcs(payload: GCSAnalyzeRequest):
         prediction, probability = run_inference_on_bytes(audio_bytes)
 
         # 3) Guardar en Firestore
-        # Generamos un ID a partir del hash del path + timestamp
-        hash_input = f"{payload.gcs_path}-{datetime.utcnow().isoformat()}".encode("utf-8")
+        # 🔑 ID estable basado SOLO en el gcs_path:
+        hash_input = payload.gcs_path.encode("utf-8")
         analysis_id = hashlib.sha256(hash_input).hexdigest()[:16]
 
         doc_ref = (
@@ -298,7 +298,8 @@ async def analyze_audio_gcs(payload: GCSAnalyzeRequest):
             "source": "gcs-analyze",
         }
 
-        doc_ref.set(doc_data)
+        # merge=True por si ya existía el doc (lo actualiza en lugar de crear otro)
+        doc_ref.set(doc_data, merge=True)
 
         return {
             "audioId": analysis_id,
